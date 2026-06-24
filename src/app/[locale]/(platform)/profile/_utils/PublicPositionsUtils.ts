@@ -1,9 +1,13 @@
+import type { PublicClient } from 'viem'
 import type { MergeableMarket } from '@/app/[locale]/(platform)/profile/_components/MergePositionsDialog'
 import type { PublicPosition } from '@/app/[locale]/(platform)/profile/_components/PublicPositionItem'
 import type { ConditionShares, PositionsTotals, SortDirection, SortOption } from '@/app/[locale]/(platform)/profile/_types/PublicPositionsTypes'
+import { createPublicClient, erc1155Abi, http } from 'viem'
 import { fetchUserOpenOrders } from '@/app/[locale]/(platform)/event/[slug]/_hooks/useUserOpenOrdersQuery'
 import { MICRO_UNIT, OUTCOME_INDEX } from '@/lib/constants'
+import { CONDITIONAL_TOKENS_CONTRACT } from '@/lib/contracts'
 import { formatCurrency } from '@/lib/formatters'
+import { defaultViemNetwork, defaultViemRpcUrl } from '@/lib/viem-network'
 
 export interface DataApiPosition {
   proxyWallet?: string
@@ -35,6 +39,26 @@ export interface DataApiPosition {
   timestamp?: number
   negativeRisk?: boolean
   negative_risk?: boolean
+}
+
+let publicClient: PublicClient | null = null
+
+function getPublicClient() {
+  publicClient ??= createPublicClient({
+    chain: defaultViemNetwork,
+    transport: http(defaultViemRpcUrl),
+  })
+
+  return publicClient
+}
+
+function normalizeSharesFromBalance(balance: bigint): number {
+  if (balance <= 0n) {
+    return 0
+  }
+
+  const decimalValue = Number(balance) / MICRO_UNIT
+  return Math.max(0, Math.floor(decimalValue * MICRO_UNIT) / MICRO_UNIT)
 }
 
 export function formatCurrencyValue(value?: number) {
@@ -519,6 +543,42 @@ export async function fetchLockedSharesByCondition(markets: MergeableMarket[]): 
   }))
 
   return availabilityByCondition
+}
+
+export async function fetchOnchainSharesByCondition(
+  markets: MergeableMarket[],
+  ownerAddress: `0x${string}`,
+): Promise<Record<string, Record<string, number>>> {
+  const descriptors = markets.flatMap((market) => {
+    if (!market.conditionId || !Array.isArray(market.outcomeAssets) || market.outcomeAssets.length !== 2) {
+      return []
+    }
+
+    return market.outcomeAssets.map(asset => ({
+      conditionId: market.conditionId!,
+      asset,
+    }))
+  })
+
+  if (descriptors.length === 0) {
+    return {}
+  }
+
+  const balances = await getPublicClient().readContract({
+    address: CONDITIONAL_TOKENS_CONTRACT,
+    abi: erc1155Abi,
+    functionName: 'balanceOfBatch',
+    args: [
+      descriptors.map(() => ownerAddress),
+      descriptors.map(descriptor => BigInt(descriptor.asset)),
+    ],
+  }) as bigint[]
+
+  return descriptors.reduce<Record<string, Record<string, number>>>((acc, descriptor, index) => {
+    acc[descriptor.conditionId] ??= {}
+    acc[descriptor.conditionId][descriptor.asset] = normalizeSharesFromBalance(balances[index] ?? 0n)
+    return acc
+  }, {})
 }
 
 export function sortPositions(
